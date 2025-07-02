@@ -12,19 +12,38 @@ This service automatically manages AWS EC2 instances for on-demand development e
 - **Resource cleanup**: Destroys instances when projects end
 - **State management**: Tracks which instances are in use vs idle
 
+## 💡 How it works
+
+1. **EC2 Instances** run VSCode Server (from `Dockerfile`) accessible at port 8080
+2. **Orchestrator** (this Node.js service) manages these instances:
+   - Tracks which instances are free/busy
+   - Assigns free instances to new projects
+   - Scales the Auto Scaling Group when needed
+3. **Developers** get instant access to cloud VSCode environments
+
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   GET /health   │    │ GET /:projectId  │    │  POST /destroy  │
-│  (monitoring)   │    │   (allocate)     │    │   (cleanup)     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │                 AWS Auto Scaling Group                     │
-   │                   "vscode-asg"                            │
-   └─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Orchestrator (Node.js)                  │
+│  ┌───────────────┐ ┌────────────────┐ ┌─────────────────┐  │
+│  │ GET /status   │ │ GET /:projectId│ │  POST /destroy  │  │
+│  │ (monitoring)  │ │   (allocate)   │ │   (cleanup)     │  │
+│  └───────────────┘ └────────────────┘ └─────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 AWS Auto Scaling Group                     │
+│                   "vscode-asg"                            │
+│                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │ EC2 Instance│  │ EC2 Instance│  │ EC2 Instance│  ...   │
+│  │ VSCode      │  │ VSCode      │  │ VSCode      │        │
+│  │ Server      │  │ Server      │  │ Server      │        │
+│  │ :8080       │  │ :8080       │  │ :8080       │        │
+│  └─────────────┘  └─────────────┘  └─────────────┘        │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## 🔧 API Endpoints
@@ -106,24 +125,6 @@ The orchestrator maintains a **buffer of 5 idle instances**:
 | 8 total, 1 idle | Scale up | 12 instances (+4) |
 | 15 total, 7 idle | No change | 15 instances (sufficient buffer) |
 
-## 🛠️ Usage Examples
-
-### Allocate instance for project
-```bash
-curl http://localhost:9092/my-project-name
-```
-
-### Check status
-```bash
-curl http://localhost:9092/status
-```
-
-### Destroy instance
-```bash
-curl -X POST http://localhost:9092/destroy \
-  -H "Content-Type: application/json" \
-  -d '{"machineId": "i-1234567890abcdef0"}'
-```
 
 ## 🔍 Monitoring
 
@@ -153,17 +154,43 @@ Scaled Auto Scaling Group to 13 instances
 
 This orchestrator expects:
 - **Auto Scaling Group**: Named `vscode-asg`
-- **EC2 Instances**: With public IP addresses
+  - Should use EC2 instances built from the included `Dockerfile`
+  - Instances must have **public IP addresses**
+  - Launch template should expose port 8080 for VSCode Server
 - **IAM Permissions**: 
   - `autoscaling:DescribeAutoScalingInstances`
   - `autoscaling:SetDesiredCapacity`  
   - `autoscaling:TerminateInstanceInAutoScalingGroup`
   - `ec2:DescribeInstances`
+- **Security Groups**: Allow inbound traffic on port 8080 (VSCode Server)
 
-## 📦 Docker Support
+## 📦 Docker Architecture
+
+### EC2 Instances (VSCode Server)
+The included `Dockerfile` is used for **EC2 instances** that run VSCode Server:
 
 ```dockerfile
-FROM node:16-alpine
+FROM codercom/code-server:4.96.4
+USER root
+RUN apt-get update \
+    && apt-get install -y curl \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+USER coder
+EXPOSE 8080
+RUN mkdir -p /tmp/bolty-worker
+CMD ["code-server", "--auth", "none", "--bind-addr", "0.0.0.0:8080", "/tmp/bolty-worker"]
+```
+
+This creates VSCode Server instances accessible at `http://instance-ip:8080`
+
+### Orchestrator Deployment
+For the orchestrator itself, you can use:
+
+```dockerfile
+FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
@@ -172,18 +199,3 @@ EXPOSE 9092
 CMD ["npm", "start"]
 ```
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-**Built for dynamic cloud development environments** 🚀 
